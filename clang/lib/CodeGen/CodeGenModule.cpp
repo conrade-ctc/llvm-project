@@ -453,9 +453,6 @@ CodeGenModule::CodeGenModule(ASTContext &C,
       LangOpts.CPlusPlusModules && getCXXABI().getMangleContext().getKind() ==
                                        ItaniumMangleContext::MK_Itanium;
 
-  // Detect incremental mode for vtable deferral
-  InIncrementalMode = LangOpts.IncrementalExtensions;
-
   RuntimeCC = getTargetCodeGenInfo().getABIInfo().getRuntimeCC();
 
   if (LangOpts.ObjC)
@@ -977,9 +974,6 @@ void CodeGenModule::Release() {
   if (CXX20ModuleInits && Primary && !Primary->isHeaderLikeModule())
     EmitModuleInitializers(Primary);
   EmitDeferred();
-
-  // In incremental mode, vtables are emitted as soon as all virtual functions are available
-
   DeferredDecls.insert_range(EmittedDeferredDecls);
   EmittedDeferredDecls.clear();
   EmitVTablesOpportunistically();
@@ -3692,34 +3686,12 @@ void CodeGenModule::EmitDeferred() {
   // for a static function, iterate until no changes are made.
 
   if (!DeferredVTables.empty()) {
-    if (InIncrementalMode) {
-      // Use class-level virtual function tracking
-      for (const CXXRecordDecl *RD : DeferredVTables) {
-        auto &Tracker = IncrementalClassTrackers[RD];
+    EmitDeferredVTables();
 
-        // Mark that vtable was requested for this class
-        Tracker.VTableRequested = true;
-
-        // Track all virtual functions declared in this class
-        for (const auto *Method : RD->methods()) {
-          if (Method->isVirtual()) {
-            TrackIncrementalVirtualFunction(Method, Method->isDefined() || Method->hasBody());
-          }
-        }
-
-        // Try to emit the vtable if all virtual functions are defined
-        CheckAndEmitIncrementalVTable(RD);
-      }
-      DeferredVTables.clear();
-    } else {
-      // Regular mode - emit all deferred vtables
-      EmitDeferredVTables();
-
-      // Emitting a vtable doesn't directly cause more vtables to
-      // become deferred, although it can cause functions to be
-      // emitted that then need those vtables.
-      assert(DeferredVTables.empty());
-    }
+    // Emitting a vtable doesn't directly cause more vtables to
+    // become deferred, although it can cause functions to be
+    // emitted that then need those vtables.
+    assert(DeferredVTables.empty());
   }
 
   // Emit CUDA/HIP static device variables referenced by host code only.
@@ -7643,13 +7615,6 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
     // Always provide some coverage mapping
     // even for the functions that aren't emitted.
     AddDeferredUnusedCoverageMapping(D);
-
-    // Track virtual function definitions in incremental mode
-    if (auto *MD = dyn_cast<CXXMethodDecl>(D)) {
-      if (MD->isVirtual() && (MD->isDefined() || MD->hasBody())) {
-        TrackIncrementalVirtualFunction(MD, true);
-      }
-    }
     break;
 
   case Decl::CXXDeductionGuide:

@@ -459,18 +459,6 @@ private:
   /// A queue of (optional) vtables that may be emitted opportunistically.
   std::vector<const CXXRecordDecl *> OpportunisticVTables;
 
-  /// Track incremental compilation mode for vtable emission.
-  bool InIncrementalMode = false;
-
-  /// Track virtual functions for each class in incremental mode.
-  struct IncrementalVirtualFunctionTracker {
-    llvm::DenseSet<const CXXMethodDecl*> DeclaredVirtualFunctions;
-    llvm::DenseSet<const CXXMethodDecl*> DefinedVirtualFunctions;
-    bool VTableRequested = false; // Whether vtable emission was requested for this class
-    bool VTableEmitted = false; // Whether vtable was already emitted for this class
-  };
-  llvm::DenseMap<const CXXRecordDecl*, IncrementalVirtualFunctionTracker> IncrementalClassTrackers;
-
   /// List of global values which are required to be present in the object file;
   /// bitcast to i8*. This is used for forcing visibility of symbols which may
   /// otherwise be optimized out.
@@ -2019,11 +2007,6 @@ private:
 
   /// Emit any vtables which we deferred and still have a use for.
   void EmitDeferredVTables();
-
-  /// Emit incremental deferred vtables whose key functions are now defined.
-  void TrackIncrementalVirtualFunction(const CXXMethodDecl *MD, bool IsDefined);
-  void CheckAndEmitIncrementalVTable(const CXXRecordDecl *RD);
-  bool AreAllVirtualFunctionsDefined(const CXXRecordDecl *RD);
 
   /// Emit a dummy function that reference a CoreFoundation symbol when
   /// @available is used on Darwin.

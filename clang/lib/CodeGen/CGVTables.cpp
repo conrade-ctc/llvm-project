@@ -1151,6 +1151,14 @@ CodeGenModule::getVTableLinkage(const CXXRecordDecl *RD) {
                    ? llvm::GlobalVariable::LinkOnceODRLinkage
                    : llvm::Function::InternalLinkage;
 
+      // In incremental compilation, each partial translation unit is a separate
+      // LLVM module. Multiple PTUs may independently emit the vtable (once the
+      // key function's body is visible), causing duplicate symbol errors in the
+      // JIT. Use linkonce_odr so the JIT linker keeps the first definition and
+      // silently discards the rest, matching how template vtables work.
+      if (Context.getLangOpts().IncrementalExtensions)
+        return llvm::GlobalVariable::LinkOnceODRLinkage;
+
       return llvm::GlobalVariable::ExternalLinkage;
 
       case TSK_ImplicitInstantiation:
@@ -1309,139 +1317,6 @@ void CodeGenModule::EmitDeferredVTables() {
   assert(savedSize == DeferredVTables.size() &&
          "deferred extra vtables during vtable emission?");
   DeferredVTables.clear();
-}
-
-void CodeGenModule::TrackIncrementalVirtualFunction(const CXXMethodDecl *MD, bool IsDefined) {
-  if (!InIncrementalMode || !MD->isVirtual())
-    return;
-
-  const CXXRecordDecl *RD = MD->getParent();
-  auto &Tracker = IncrementalClassTrackers[RD];
-
-  // Always track declared virtual functions
-  Tracker.DeclaredVirtualFunctions.insert(MD);
-
-  // Track defined virtual functions
-  if (IsDefined) {
-    Tracker.DefinedVirtualFunctions.insert(MD);
-
-    // Check if this is an inline definition and update key function cache
-    const CXXMethodDecl *DefMD = dyn_cast_or_null<CXXMethodDecl>(MD->getDefinition());
-    bool IsInlineDefinition = DefMD && (DefMD->isInlined() || DefMD->isInlineSpecified());
-
-    if (IsInlineDefinition) {
-      // Get the first declaration from the class definition
-      const CXXMethodDecl *FirstDecl = cast<CXXMethodDecl>(MD->getFirstDecl());
-      getContext().setNonKeyFunction(FirstDecl);
-    }
-  }
-
-
-  // Check if we can emit the vtable now
-  CheckAndEmitIncrementalVTable(RD);
-}
-
-bool CodeGenModule::AreAllVirtualFunctionsDefined(const CXXRecordDecl *RD) {
-  if (!InIncrementalMode)
-    return true;
-
-  auto It = IncrementalClassTrackers.find(RD);
-  if (It == IncrementalClassTrackers.end())
-    return true; // No virtual functions tracked yet
-
-  const auto &Tracker = It->second;
-
-  // Collect all virtual functions from the class hierarchy
-  llvm::DenseSet<const CXXMethodDecl*> AllVirtualFunctions;
-
-  for (const auto *Method : RD->methods()) {
-    if (Method->isVirtual()) {
-      AllVirtualFunctions.insert(Method->getCanonicalDecl());
-    }
-  }
-
-  // Check virtual functions from base classes
-  for (const auto &Base : RD->bases()) {
-    if (const CXXRecordDecl *BaseRD = Base.getType()->getAsCXXRecordDecl()) {
-      for (const auto *Method : BaseRD->methods()) {
-        if (Method->isVirtual()) {
-          // Find overriding method in derived class
-          bool HasOverride = false;
-          for (const auto *DerivedMethod : RD->methods()) {
-            if (DerivedMethod->isVirtual() &&
-                DerivedMethod->getNameAsString() == Method->getNameAsString()) {
-              HasOverride = true;
-              AllVirtualFunctions.insert(DerivedMethod->getCanonicalDecl());
-              break;
-            }
-          }
-          if (!HasOverride) {
-            AllVirtualFunctions.insert(Method->getCanonicalDecl());
-          }
-        }
-      }
-    }
-  }
-
-  // Check if all virtual functions are defined
-  for (const CXXMethodDecl *VF : AllVirtualFunctions) {
-    if (Tracker.DefinedVirtualFunctions.find(VF) == Tracker.DefinedVirtualFunctions.end()) {
-      // This virtual function is not yet defined
-      if (!VF->isPureVirtual() && !VF->hasBody() && !VF->isDefined()) {
-        return false;
-      }
-    }
-  }
-
-  return true;
-}
-
-void CodeGenModule::CheckAndEmitIncrementalVTable(const CXXRecordDecl *RD) {
-  if (!InIncrementalMode)
-    return;
-
-  auto It = IncrementalClassTrackers.find(RD);
-  if (It == IncrementalClassTrackers.end())
-    return;
-
-  auto &Tracker = It->second;
-
-  // Check if vtable global variable already exists
-  std::string VTableName;
-  llvm::raw_string_ostream VTableNameStream(VTableName);
-  getCXXABI().getMangleContext().mangleCXXVTable(RD, VTableNameStream);
-  VTableNameStream.flush();
-  llvm::GlobalVariable *ExistingVTable = getModule().getGlobalVariable(VTableName);
-  bool AlreadyExists = (ExistingVTable != nullptr);
-
-  // Check if the class has a key function
-  const CXXMethodDecl *KeyFunction = getContext().getCurrentKeyFunction(RD);
-  bool HasKeyFunction = (KeyFunction != nullptr);
-  bool AllDefined = AreAllVirtualFunctionsDefined(RD);
-
-
-  // Check if we have inline virtual functions
-  bool HasInlineVirtuals = false;
-  for (const CXXMethodDecl *VF : Tracker.DefinedVirtualFunctions) {
-    const CXXMethodDecl *DefMD = dyn_cast_or_null<CXXMethodDecl>(VF->getDefinition());
-    if (DefMD && (DefMD->isInlined() || DefMD->isInlineSpecified())) {
-      HasInlineVirtuals = true;
-      break;
-    }
-  }
-
-  // Emit vtable if:
-  // 1. It was requested, AND
-  // 2. Either:
-  //    a) It doesn't already exist, OR
-  //    b) It exists but we now have inline virtual function definitions that weren't available before
-  // 3. Either all virtual functions are defined OR there's no key function OR we have inline virtuals
-  bool ShouldEmitInlineUpdate = AlreadyExists && HasInlineVirtuals && AllDefined;
-  if (Tracker.VTableRequested && (!AlreadyExists || ShouldEmitInlineUpdate) && (AllDefined || !HasKeyFunction || HasInlineVirtuals)) {
-    VTables.GenerateClassData(RD);
-    Tracker.VTableEmitted = true; // Mark as emitted to prevent re-emission
-    Tracker.VTableRequested = false; // Reset request flag
-  }
 }
 
 bool CodeGenModule::AlwaysHasLTOVisibilityPublic(const CXXRecordDecl *RD) {
