@@ -11904,9 +11904,10 @@ bool Sema::CheckDeductionGuideDeclarator(Declarator &D, QualType &R,
 
       const QualifiedTemplateName *Qualifiers =
           SpecifiedName.getAsQualifiedTemplateName();
-      assert(Qualifiers && "expected QualifiedTemplate");
-      bool SimplyWritten =
-          !Qualifiers->hasTemplateKeyword() && !Qualifiers->getQualifier();
+      // A Template template parameter is never wrapped in a
+      // QualifiedTemplateName, but it's always simply-written.
+      bool SimplyWritten = !Qualifiers || (!Qualifiers->hasTemplateKeyword() &&
+                                           !Qualifiers->getQualifier());
       if (SimplyWritten && TemplateMatches)
         AcceptableReturnType = true;
       else {
@@ -13937,10 +13938,13 @@ Decl *Sema::ActOnAliasDeclaration(Scope *S, AccessSpecifier AS,
       }
 
       if (!Invalid && OldDecl && !OldDecl->isInvalidDecl()) {
-        if (TemplateParameterListsAreEqual(TemplateParams,
-                                           OldDecl->getTemplateParameters(),
-                                           /*Complain=*/true,
-                                           TPL_TemplateMatch))
+        // It's ok that we don't pass the declarations corresponding to the
+        // template parameter lists here, because type alias templates cannot be
+        // declared out-of-line.
+        if (TemplateParameterListsAreEqual(
+                /*NewInstFrom=*/nullptr, TemplateParams,
+                /*OldInstFrom=*/nullptr, OldDecl->getTemplateParameters(),
+                /*Complain=*/true, TPL_TemplateMatch))
           OldTemplateParams =
               OldDecl->getMostRecentDecl()->getTemplateParameters();
         else
